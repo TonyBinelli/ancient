@@ -1,9 +1,3 @@
-/**
- * main.js  –  Entry point for the Ancient Battle Simulation.
- *
- * Step 1 scope: isometric map with terrain (grass, forests, pond).
- * Camera: drag to pan, scroll-wheel to zoom.
- */
 import * as PIXI from 'pixi.js';
 import { CONFIG }        from './config.js';
 import { IsometricMap }  from './map/IsometricMap.js';
@@ -15,23 +9,23 @@ import { BattleManager } from './battle/BattleManager.js';
 const app = new PIXI.Application({
   width:           CONFIG.SCREEN.WIDTH,
   height:          CONFIG.SCREEN.HEIGHT,
-  backgroundColor: 0x2a4a18,   // dark green – visible only outside the map
+  backgroundColor: 0x2a4a18,
   antialias:       true,
   resolution:      window.devicePixelRatio || 1,
   autoDensity:     true,
 });
 document.body.appendChild(app.view);
 
-// ── World container – everything in the game lives here ──────────────────────
+// ── World container ──────────────────────────────────────────────────────────
 const world = new PIXI.Container();
 app.stage.addChild(world);
 
 // ── Build map ────────────────────────────────────────────────────────────────
 const isoMap  = new IsometricMap();
-const terrain = new Terrain(isoMap);   // sets tile types into isoMap.grid
+const terrain = new Terrain(isoMap);
 
-isoMap.build();             // render tiles using Painter's Algorithm
-terrain.buildDecorations(); // draw trees / water ripples on top of tiles
+isoMap.build();
+terrain.buildDecorations();
 
 world.addChild(isoMap.container);
 world.addChild(terrain.container);
@@ -42,9 +36,9 @@ world.addChild(unitMgr.container);
 
 // ── Battle manager ────────────────────────────────────────────────────────────
 const onVictory = (winner) => {
-  const label = winner === 'roman' ? 'Roma Victoria!' : 'Die Barbaren triumphieren!';
+  const label     = winner === 'roman' ? 'Roma Victoria!' : 'Die Barbaren triumphieren!';
   const survivors = battleMgr.counts[winner];
-  const overlay = document.getElementById('overlay');
+  const overlay   = document.getElementById('overlay');
   overlay.querySelector('h1').textContent = label;
   overlay.querySelector('p').textContent  = `${survivors} Überlebende`;
   const btn = overlay.querySelector('button');
@@ -53,31 +47,27 @@ const onVictory = (winner) => {
   overlay.style.display = 'flex';
 };
 
-const battleMgr = new BattleManager(unitMgr.fighters, isoMap, onVictory);
+// BattleManager now receives formations (not raw fighters)
+const battleMgr = new BattleManager(unitMgr.formations, isoMap, onVictory);
 
-// ── Fit whole battlefield into the viewport on startup ───────────────────────
+// ── Initial camera: fit the whole battlefield ────────────────────────────────
 const { COLS, ROWS, TILE_W, TILE_H } = CONFIG.MAP;
-
-// The map's bounding box in local (world) coordinates:
-//   width  = (COLS + ROWS) * TILE_W/2   ≈ 2240 px
-//   height = (COLS + ROWS) * TILE_H/2   ≈ 1120 px
-//   centre = ( width/2,  height/2 )     = (1120, 560)
-const mapLocalW   = (COLS + ROWS) * (TILE_W / 2);
-const mapLocalH   = (COLS + ROWS) * (TILE_H / 2);
+const mapLocalW    = (COLS + ROWS) * (TILE_W / 2);
+const mapLocalH    = (COLS + ROWS) * (TILE_H / 2);
 const localCentreX = mapLocalW / 2;
 const localCentreY = mapLocalH / 2;
 
 const initScale = Math.min(
   CONFIG.SCREEN.WIDTH  / mapLocalW,
   CONFIG.SCREEN.HEIGHT / mapLocalH,
-) * 0.92;   // 8 % margin
+) * 0.92;
 
 world.scale.set(initScale);
 world.x = CONFIG.SCREEN.WIDTH  / 2 - localCentreX * initScale;
 world.y = CONFIG.SCREEN.HEIGHT / 2 - localCentreY * initScale;
 
 // ── Drag to pan ───────────────────────────────────────────────────────────────
-let drag = null;  // { startMouse, startWorld }
+let drag = null;
 
 app.stage.interactive = true;
 app.stage.hitArea = app.screen;
@@ -102,35 +92,65 @@ app.stage.on('pointerupoutside', stopDrag);
 // ── Scroll-wheel zoom ─────────────────────────────────────────────────────────
 app.view.addEventListener('wheel', e => {
   e.preventDefault();
-
   const factor   = e.deltaY < 0 ? 1.1 : (1 / 1.1);
   const newScale = Math.max(0.25, Math.min(3.5, world.scale.x * factor));
-
-  // Keep the point under the cursor fixed in world space
-  const mx = e.clientX;
-  const my = e.clientY;
+  const mx = e.clientX, my = e.clientY;
   const wx = (mx - world.x) / world.scale.x;
   const wy = (my - world.y) / world.scale.y;
-
   world.scale.set(newScale);
   world.x = mx - wx * newScale;
   world.y = my - wy * newScale;
 }, { passive: false });
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
+// Roman formations list (with order-toggle buttons)
+const romanFms = unitMgr.formations.filter(fm => fm.team === 'roman');
+const barbFms  = unitMgr.formations.filter(fm => fm.team === 'barbarian');
+
+function fmRowHtml(fm) {
+  const isRoman = fm.team === 'roman';
+  const btnId   = `btn-${fm.id}`;
+  const cntId   = `cnt-${fm.id}`;
+  const btnHtml = isRoman
+    ? `<button id="${btnId}" class="order-btn hold" onclick="window.toggleOrder('${fm.id}')">Halten</button>`
+    : '';
+  return `
+    <div class="fm-row">
+      <span class="fm-label">${fm.label}</span>
+      <span class="fm-count" id="${cntId}">${fm.count}</span>
+      ${btnHtml}
+    </div>`;
+}
+
 document.getElementById('hud').innerHTML = `
-  <b>Antike Schlachtsimulation</b><br>
-  <span style="color:#ff8080">Römer: <span id="hud-roman">${CONFIG.UNITS.ROMAN.COUNT}</span></span>
-  &nbsp;|&nbsp;
-  <span style="color:#88aaff">Barbaren: <span id="hud-barbarian">${CONFIG.UNITS.BARBARIAN.COUNT}</span></span><br>
-  <small>Linksklick + Ziehen &nbsp;|&nbsp; Mausrad: Zoom</small>
+  <div class="hud-section">
+    <div class="hud-title roman-color">Romer</div>
+    ${romanFms.map(fmRowHtml).join('')}
+  </div>
+  <div class="hud-divider"></div>
+  <div class="hud-section">
+    <div class="hud-title barb-color">Barbaren</div>
+    ${barbFms.map(fmRowHtml).join('')}
+  </div>
+  <div class="hud-hint">Zug + Mausrad: Kamera</div>
 `;
 
-// Cache span references so the ticker never queries the DOM by id.
-const hudRoman     = document.getElementById('hud-roman');
-const hudBarbarian = document.getElementById('hud-barbarian');
-let   prevRoman    = CONFIG.UNITS.ROMAN.COUNT;
-let   prevBarb     = CONFIG.UNITS.BARBARIAN.COUNT;
+// Cache count spans to avoid repeated DOM queries
+const countSpans = new Map();
+for (const fm of unitMgr.formations) {
+  countSpans.set(fm.id, document.getElementById(`cnt-${fm.id}`));
+}
+const prevCounts = new Map(unitMgr.formations.map(fm => [fm.id, fm.count]));
+
+// Toggle Roman formation order
+window.toggleOrder = (id) => {
+  const fm  = unitMgr.formations.find(f => f.id === id);
+  const btn = document.getElementById(`btn-${id}`);
+  if (!fm || !btn) return;
+  fm.order = fm.order === 'hold' ? 'advance' : 'hold';
+  btn.textContent = fm.order === 'hold' ? 'Halten' : 'Vorrücken';
+  btn.className   = `order-btn ${fm.order}`;
+};
 
 // ── Start button ──────────────────────────────────────────────────────────────
 document.getElementById('startBtn').addEventListener('click', () => {
@@ -140,24 +160,23 @@ document.getElementById('startBtn').addEventListener('click', () => {
 
 // ── Game loop ─────────────────────────────────────────────────────────────────
 app.ticker.add(() => {
-  const dt = app.ticker.deltaMS / 1000;   // real seconds since last frame
+  const dt = app.ticker.deltaMS / 1000;
 
-  battleMgr.update(dt);       // game logic: move fighters, resolve attacks
-  unitMgr.syncSprites(dt);    // visual: position / tint / fade sprites
+  battleMgr.update(dt);
+  unitMgr.syncSprites(dt);
 
-  // Update HUD counters only when a fighter dies (minimise DOM writes).
-  const c = battleMgr.counts;
-  if (c.roman !== prevRoman) {
-    hudRoman.textContent = c.roman;
-    prevRoman = c.roman;
-  }
-  if (c.barbarian !== prevBarb) {
-    hudBarbarian.textContent = c.barbarian;
-    prevBarb = c.barbarian;
+  // Update formation count spans only when a death occurs
+  for (const fm of unitMgr.formations) {
+    const cur = fm.count;
+    if (cur !== prevCounts.get(fm.id)) {
+      const span = countSpans.get(fm.id);
+      if (span) span.textContent = cur;
+      prevCounts.set(fm.id, cur);
+    }
   }
 });
 
-// ── Resize handler ────────────────────────────────────────────────────────────
+// ── Resize ────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
   app.renderer.resize(window.innerWidth, window.innerHeight);
   app.stage.hitArea = app.screen;

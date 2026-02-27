@@ -1,11 +1,15 @@
 /**
  * BattleManager – pure game-logic core.
- * No PixiJS dependency; reads and writes Fighter data only.
+ * No PixiJS dependency; reads and writes Fighter / Formation data only.
  *
  * Phases:
  *   READY  – armies in formation, waiting for start()
  *   MARCH  – fighters advance and fight
  *   DONE   – one side wiped out, onVictory callback fired
+ *
+ * Formation orders:
+ *   'hold'    – fighter stands still; attacks any enemy that enters range
+ *   'advance' – fighter marches toward the enemy; switches to combat on contact
  */
 import { CONFIG }    from '../config.js';
 import { TILE_TYPE } from '../map/IsometricMap.js';
@@ -29,23 +33,27 @@ function centroid(list) {
 // ── BattleManager ─────────────────────────────────────────────────────────────
 export class BattleManager {
   /**
-   * @param {import('../units/Fighter.js').Fighter[]} fighters
+   * @param {import('../units/Formation.js').Formation[]} formations
    * @param {import('../map/IsometricMap.js').IsometricMap} isoMap
    * @param {(winner: 'roman'|'barbarian') => void} onVictory
    */
-  constructor(fighters, isoMap, onVictory) {
-    this.fighters   = fighters;
+  constructor(formations, isoMap, onVictory) {
+    this.formations = formations;
+    this.fighters   = formations.flatMap(fm => fm.fighters);
     this.map        = isoMap;
     this._onVictory = onVictory;
     this.phase      = 'READY';
 
-    // O(1) survivor counts; decremented on each death.
+    // O(1) formation lookup by id
+    this._formMap = new Map(formations.map(fm => [fm.id, fm]));
+
+    // Survivor counts, decremented on each death
     this._counts = {
-      roman:     fighters.filter(f => f.team === 'roman').length,
-      barbarian: fighters.filter(f => f.team === 'barbarian').length,
+      roman:     this.fighters.filter(f => f.team === 'roman').length,
+      barbarian: this.fighters.filter(f => f.team === 'barbarian').length,
     };
 
-    this._grid = new Map();   // spatial hash: "cx,cy" → Fighter[]
+    this._grid = new Map();
   }
 
   get counts() { return this._counts; }
@@ -55,16 +63,11 @@ export class BattleManager {
     this.phase = 'MARCH';
   }
 
-  /**
-   * Advance simulation by one frame.
-   * @param {number} dt  seconds since last frame
-   */
   update(dt) {
     if (this.phase !== 'MARCH') return;
 
     this._buildGrid();
 
-    // Enemy centroids computed once; all fighters of a team aim at the same point.
     const romans     = this.fighters.filter(f => f.team === 'roman'     && f.alive);
     const barbarians = this.fighters.filter(f => f.team === 'barbarian' && f.alive);
     const romanCtr      = romans.length     ? centroid(romans)     : null;
@@ -73,11 +76,20 @@ export class BattleManager {
     for (const f of this.fighters) {
       if (!f.alive) continue;
 
-      const enemyCtr = f.team === 'roman' ? barbarianCtr : romanCtr;
-      if (!enemyCtr) continue;
+      const enemyCtr  = f.team === 'roman' ? barbarianCtr : romanCtr;
+      const formation = this._formMap.get(f.formationId);
+      const isHolding = formation?.order === 'hold';
 
-      if      (f.state === 'march')  this._doMarch(f, enemyCtr, dt);
-      else if (f.state === 'combat') this._doCombat(f, dt);
+      if (f.state === 'combat') {
+        this._doCombat(f, dt, isHolding);
+      } else {
+        // 'march' or 'idle' – either march or hold in place
+        if (isHolding) {
+          this._doHold(f, dt);
+        } else {
+          if (enemyCtr) this._doMarch(f, enemyCtr, dt);
+        }
+      }
     }
 
     this._checkVictory();
@@ -110,20 +122,36 @@ export class BattleManager {
     return out;
   }
 
-  // ── Movement ──────────────────────────────────────────────────────────────
+  // ── Hold (stand still, fight back) ───────────────────────────────────────
+
+  _doHold(f, dt) {
+    // Tick attack timer even while holding
+    f.attackTimer -= dt;
+
+    // Look for an enemy that wandered into attack range
+    const target = this._nearestEnemy(f, f.attackRange * 1.5);
+    if (target) {
+      f.state        = 'combat';
+      f.combatTarget = target;
+      // Stagger first attack
+      if (f.attackTimer > 0) f.attackTimer = Math.random() * f.cooldown * 0.5;
+    }
+  }
+
+  // ── March ─────────────────────────────────────────────────────────────────
 
   _doMarch(f, enemyCtr, dt) {
-    // Seek toward enemy centroid (unit vector).
+    // Seek toward enemy centroid
     let seekDc = enemyCtr.col - f.col;
     let seekDr = enemyCtr.row - f.row;
     const seekLen = Math.sqrt(seekDc * seekDc + seekDr * seekDr);
     if (seekLen > 0) { seekDc /= seekLen; seekDr /= seekLen; }
 
-    // One neighbour pass: separation + engagement detection.
-    const maxR = Math.max(BATTLE.SEP_RADIUS, BATTLE.ENGAGE_RANGE);
+    // Separation + engagement detection
+    const maxR = Math.max(BATTLE.SEP_RADIUS, f.attackRange);
     let sepDc = 0, sepDr = 0;
     let closestEnemy = null;
-    let closestD2    = BATTLE.ENGAGE_RANGE * BATTLE.ENGAGE_RANGE;
+    let closestD2    = f.attackRange * f.attackRange;   // per-unit range
 
     for (const o of this._getNearby(f, maxR)) {
       if (!o.alive) continue;
@@ -131,7 +159,7 @@ export class BattleManager {
       const ddr = f.row - o.row;
       const d2  = ddc * ddc + ddr * ddr;
 
-      // Separation from ALL nearby fighters.
+      // Separation from all nearby fighters
       if (d2 < BATTLE.SEP_RADIUS * BATTLE.SEP_RADIUS && d2 > 0) {
         const d = Math.sqrt(d2);
         const w = 1.0 - d / BATTLE.SEP_RADIUS;
@@ -139,43 +167,45 @@ export class BattleManager {
         sepDr += (ddr / d) * w;
       }
 
-      // Nearest enemy within engage range.
+      // Nearest enemy within this unit's attack range
       if (o.team !== f.team && d2 < closestD2) {
         closestD2    = d2;
         closestEnemy = o;
       }
     }
 
-    // Blend seek + separation, then normalise to constant speed.
+    // Blend seek + separation
     let vx = seekDc + sepDc * BATTLE.SEP_FORCE;
     let vy = seekDr + sepDr * BATTLE.SEP_FORCE;
     const vlen = Math.sqrt(vx * vx + vy * vy);
     if (vlen > 0) { vx /= vlen; vy /= vlen; }
 
-    // Terrain-aware step: skip water tiles.
-    const nc = f.col + vx * BATTLE.MARCH_SPEED * dt;
-    const nr = f.row + vy * BATTLE.MARCH_SPEED * dt;
+    // Terrain-aware step (skip water)
+    const nc = f.col + vx * f.speed * dt;
+    const nr = f.row + vy * f.speed * dt;
     if (this.map.getTile(Math.round(nc), Math.round(nr)) !== TILE_TYPE.WATER) {
       f.col = nc;
       f.row = nr;
     }
 
-    // Engage if an enemy is in range.
+    // Switch to combat if enemy detected in range
     if (closestEnemy) {
       f.state        = 'combat';
       f.combatTarget = closestEnemy;
-      // Stagger first attack so not everyone swings at the same instant.
-      f.attackTimer  = Math.random() * BATTLE.ATTACK_COOLDOWN * 0.5;
+      f.attackTimer  = Math.random() * f.cooldown * 0.5;
     }
   }
 
   // ── Combat ────────────────────────────────────────────────────────────────
 
-  _doCombat(f, dt) {
-    // Refresh stale or dead target.
+  _doCombat(f, dt, isHolding) {
+    // Refresh stale or dead target
     if (!f.combatTarget?.alive) {
-      f.combatTarget = this._nearestEnemy(f, BATTLE.ENGAGE_RANGE * 2.5);
-      if (!f.combatTarget) { f.state = 'march'; return; }
+      f.combatTarget = this._nearestEnemy(f, f.attackRange * 2.0);
+      if (!f.combatTarget) {
+        f.state = 'march';
+        return;
+      }
     }
 
     const e  = f.combatTarget;
@@ -183,32 +213,64 @@ export class BattleManager {
     const dr = e.row - f.row;
     const d  = Math.sqrt(dc * dc + dr * dr);
 
-    // Close the gap if target drifted out of attack range.
-    if (d > BATTLE.ATTACK_RANGE) {
-      const s = BATTLE.MARCH_SPEED * 0.55 * dt / d;
+    // Melee units close the gap; ranged/splash units stand still
+    if (f.attackType === 'melee' && !isHolding && d > f.attackRange) {
+      const s = f.speed * 0.55 * dt / d;
       f.col += dc * s;
       f.row += dr * s;
     }
 
-    // Attack tick.
+    // If target drifted out of maximum range, release it
+    if (d > f.attackRange * 2.5) {
+      f.combatTarget = null;
+      f.state = 'march';
+      return;
+    }
+
+    // Attack tick
     f.attackTimer -= dt;
-    if (f.attackTimer <= 0 && d <= BATTLE.ATTACK_RANGE) {
-      f.attackTimer = BATTLE.ATTACK_COOLDOWN;
+    if (f.attackTimer <= 0 && d <= f.attackRange) {
+      f.attackTimer = f.cooldown;
 
-      const dmg  = BATTLE.MIN_DAMAGE
-                 + Math.random() * (BATTLE.MAX_DAMAGE - BATTLE.MIN_DAMAGE);
-      e.hp      -= dmg;
-      e.hitFlash = BATTLE.HIT_FLASH;
-
-      if (e.hp <= 0) {
-        e.alive        = false;
-        e.hp           = 0;
-        e.hitFlash     = 0;          // clear flash so death-fade is clean
-        e.deathTimer   = BATTLE.DEATH_FADE;
-        f.combatTarget = null;
-        this._counts[e.team]--;
+      if (f.attackType === 'splash') {
+        this._doSplashAttack(f, e);
+      } else {
+        this._doHit(f, e);
       }
     }
+  }
+
+  // ── Attack helpers ────────────────────────────────────────────────────────
+
+  _doHit(attacker, target) {
+    const dmg = attacker.damageMin
+              + Math.random() * (attacker.damageMax - attacker.damageMin);
+    target.hp      -= dmg;
+    target.hitFlash = BATTLE.HIT_FLASH;
+    if (target.hp <= 0) this._kill(target, attacker);
+  }
+
+  /** Catapult splash: damages all enemies within splashRadius of the target. */
+  _doSplashAttack(attacker, target) {
+    const r2 = attacker.splashRadius * attacker.splashRadius;
+    for (const victim of this._getNearby(target, attacker.splashRadius + 1)) {
+      if (victim.team === attacker.team || !victim.alive) continue;
+      if (dist2(victim, target) > r2) continue;
+      const dmg = attacker.damageMin
+                + Math.random() * (attacker.damageMax - attacker.damageMin);
+      victim.hp      -= dmg;
+      victim.hitFlash = BATTLE.HIT_FLASH * 2;
+      if (victim.hp <= 0) this._kill(victim, attacker);
+    }
+  }
+
+  _kill(fighter, attacker) {
+    fighter.alive        = false;
+    fighter.hp           = 0;
+    fighter.hitFlash     = 0;
+    fighter.deathTimer   = BATTLE.DEATH_FADE;
+    if (attacker.combatTarget === fighter) attacker.combatTarget = null;
+    this._counts[fighter.team]--;
   }
 
   _nearestEnemy(f, maxRange) {

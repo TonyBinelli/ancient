@@ -5,35 +5,73 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Antike Schlachtsimulation</title>
 
-  <!-- Bind bare specifier "pixi.js" to CDN build (ES-module) -->
-  <script type="importmap">
-  {
-    "imports": {
-      "pixi.js": "https://esm.sh/pixi.js@7"
-    }
-  }
-  </script>
-
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #1e2d14; overflow: hidden; }
     canvas { display: block; }
 
+    /* ── HUD panel ──────────────────────────────────────────────────────────── */
     #hud {
       position: fixed;
       top: 12px; left: 12px;
       color: #d4c89a;
-      font: 13px/1.6 'Segoe UI', sans-serif;
-      background: rgba(0, 0, 0, 0.58);
-      padding: 8px 14px;
+      font: 12px/1.5 'Segoe UI', sans-serif;
+      background: rgba(0, 0, 0, 0.65);
+      padding: 10px 12px;
       border-radius: 6px;
-      border: 1px solid rgba(210, 170, 80, 0.35);
-      pointer-events: none;
+      border: 1px solid rgba(210, 170, 80, 0.3);
+      pointer-events: none;   /* clicks pass through to canvas … */
       user-select: none;
+      min-width: 210px;
     }
-    #hud b { color: #f0d870; letter-spacing: 0.04em; }
 
-    /* ── Start / Victory overlay ── */
+    .hud-title {
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .roman-color { color: #88aaff; }
+    .barb-color  { color: #ff8888; }
+
+    .hud-section  { margin-bottom: 6px; }
+    .hud-divider  { border-top: 1px solid rgba(210,170,80,0.25); margin: 6px 0; }
+    .hud-hint     { font-size: 10px; color: #7a6a48; margin-top: 6px; }
+
+    .fm-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 3px;
+    }
+    .fm-label { flex: 1; font-size: 12px; }
+    .fm-count { width: 24px; text-align: right; font-size: 12px; color: #f0d870; }
+
+    /* … except buttons receive clicks */
+    .order-btn {
+      pointer-events: auto;
+      padding: 2px 7px;
+      font: 11px 'Segoe UI', sans-serif;
+      border-radius: 3px;
+      cursor: pointer;
+      border: 1px solid;
+      transition: background 0.1s;
+    }
+    .order-btn.hold {
+      background: #1a3a6a;
+      border-color: #4466aa;
+      color: #aaccff;
+    }
+    .order-btn.hold:hover    { background: #1e4a8a; }
+    .order-btn.advance {
+      background: #6a1a1a;
+      border-color: #cc4444;
+      color: #ffaaaa;
+    }
+    .order-btn.advance:hover { background: #8a2222; }
+
+    /* ── Start / Victory overlay ──────────────────────────────────────────── */
     #overlay {
       position: fixed;
       inset: 0;
@@ -56,16 +94,24 @@
     #overlay p {
       color: #a08858;
       font-size: 1rem;
+      margin-bottom: 1rem;
+      text-align: center;
+    }
+    #overlay .subtitle {
+      color: #7a6a48;
+      font-size: 0.82rem;
       margin-bottom: 2.4rem;
       text-align: center;
+      max-width: 380px;
+      line-height: 1.5;
     }
     #overlay button {
       padding: 13px 44px;
       font-size: 1.05rem;
       font-family: inherit;
-      background: linear-gradient(180deg, #9b0000 0%, #650000 100%);
-      color: #f0e0a0;
-      border: 2px solid #cc8830;
+      background: linear-gradient(180deg, #0a2a6a 0%, #061844 100%);
+      color: #c8daff;
+      border: 2px solid #3366aa;
       border-radius: 6px;
       cursor: pointer;
       letter-spacing: 0.08em;
@@ -73,28 +119,25 @@
       transition: background 0.15s, transform 0.08s;
       box-shadow: 0 4px 18px rgba(0,0,0,0.55);
     }
-    #overlay button:hover  { background: linear-gradient(180deg, #bb1010 0%, #850000 100%); }
+    #overlay button:hover  { background: linear-gradient(180deg, #0e3a8a 0%, #0a2464 100%); }
     #overlay button:active { transform: translateY(1px); }
   </style>
 </head>
 <body>
   <div id="hud">
-    <b>Antike Schlachtsimulation</b><br>
-    Linksklick + Ziehen: Karte verschieben &nbsp;|&nbsp; Mausrad: Zoom
+    <!-- Filled dynamically by main.js -->
   </div>
 
   <div id="overlay">
     <h1>Römer vs. Barbaren</h1>
-    <p>Zwei Armeen. Eine Entscheidung.</p>
+    <p>Vier Truppentypen. Vier feindliche Verbände.</p>
+    <div class="subtitle">
+      Römer warten in Stellung — du entscheidest, wer vorrückt.<br>
+      Klicke <b>Halten / Vorrücken</b> im HUD um Befehle zu geben.
+    </div>
     <button id="startBtn">Kampf beginnen</button>
   </div>
 
-  <!--
-    Lokale ES-Module benötigen einen HTTP-Server (kein file://).
-    Schnellstart:
-      python3 -m http.server 8080
-    Dann: http://localhost:8080
-  -->
   <script type="module" src="src/main.js"></script>
 </body>
 </html>

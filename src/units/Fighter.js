@@ -2,46 +2,49 @@
  * Fighter – data model for a single combatant.
  * Pure data; no PixiJS dependency.
  */
+import { CONFIG } from '../config.js';
+
 export class Fighter {
   /**
    * @param {object} opts
    * @param {number} opts.id
-   * @param {number} opts.col   – continuous tile column (float)
-   * @param {number} opts.row   – continuous tile row    (float)
+   * @param {number} opts.col
+   * @param {number} opts.row
    * @param {'roman'|'barbarian'} opts.team
+   * @param {'infantry'|'cavalry'|'archer'|'catapult'} opts.unitType
+   * @param {string} opts.formationId
    */
-  constructor({ id, col, row, team }) {
-    this.id   = id;
-    this.col  = col;
-    this.row  = row;
-    this.team = team;
+  constructor({ id, col, row, team, unitType = 'infantry', formationId = null }) {
+    this.id          = id;
+    this.col         = col;
+    this.row         = row;
+    this.team        = team;
+    this.unitType    = unitType;
+    this.formationId = formationId;
 
-    // ── Vitals ──────────────────────────────────────────────────────────────
-    this.hp    = 100;
-    this.maxHp = 100;
-    this.alive = true;
+    // ── Per-type stats from config ───────────────────────────────────────────
+    const s = CONFIG.UNIT_STATS[unitType];
+    this.maxHp       = s.hp;
+    this.hp          = s.hp;
+    this.speed       = s.speed;
+    this.attackRange = s.attackRange;
+    this.cooldown    = s.cooldown;
+    this.damageMin   = s.damageMin;
+    this.damageMax   = s.damageMax;
+    this.attackType  = s.attackType;          // 'melee' | 'ranged' | 'splash'
+    this.splashRadius = s.splashRadius ?? 0;
 
     // ── Battle state ─────────────────────────────────────────────────────────
-    /** 'idle' | 'march' | 'combat' */
-    this.state = 'idle';
-
-    /** Currently targeted enemy Fighter, or null. */
+    this.alive        = true;
+    this.state        = 'idle';               // 'idle' | 'march' | 'combat'
     this.combatTarget = null;
-
-    /** Seconds until next attack is allowed. */
-    this.attackTimer = 0;
+    this.attackTimer  = 0;
 
     // ── Visual signals (read by UnitManager.syncSprites) ────────────────────
-    /** Seconds remaining for red hit-flash tint. Set by BattleManager. */
-    this.hitFlash = 0;
-
-    /** Seconds remaining for death fade-out. Set by BattleManager on death. */
+    this.hitFlash   = 0;
     this.deathTimer = 0;
-
-    /** PIXI.Sprite – set by UnitManager after sprite creation. */
-    this.sprite = null;
+    this.sprite     = null;
   }
 
-  /** Isometric depth: larger = visually in front. Used for z-ordering. */
   get depth() { return this.col + this.row; }
 }
