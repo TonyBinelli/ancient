@@ -1,0 +1,19 @@
+{
+  "name": "battle-sim",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "pixi.js": "^8.16.0",
+    "vite": "^7.3.1"
+  },
+  "devDependencies": {
+    "vite-plugin-singlefile": "^2.3.0"
+  }
+}

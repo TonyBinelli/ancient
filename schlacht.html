@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antike Schlachtsimulation</title>
+
+  <script type="importmap">
+  { "imports": { "pixi.js": "https://esm.sh/pixi.js@8" } }
+  </script>
+
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1e2d14; overflow: hidden; }
+    canvas { display: block; }
+
+    #hud {
+      position: fixed; top: 12px; left: 12px;
+      color: #d4c89a; font: 13px/1.6 'Segoe UI', sans-serif;
+      background: rgba(0,0,0,.58); padding: 8px 14px;
+      border-radius: 6px; border: 1px solid rgba(210,170,80,.35);
+      pointer-events: none; user-select: none;
+    }
+    #hud b { color: #f0d870; letter-spacing: .04em; }
+
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: rgba(4,8,2,.72); z-index: 100;
+      font-family: 'Segoe UI', Georgia, sans-serif;
+    }
+    #overlay h1 {
+      font-size: clamp(1.8rem,4vw,3rem); color: #f0d870;
+      letter-spacing: .08em; text-shadow: 0 2px 14px rgba(0,0,0,.9);
+      margin-bottom: .4rem; text-align: center;
+    }
+    #overlay p { color: #a08858; font-size: 1rem; margin-bottom: 2.4rem; text-align: center; }
+    #overlay button {
+      padding: 13px 44px; font-size: 1.05rem; font-family: inherit;
+      background: linear-gradient(180deg,#9b0000 0%,#650000 100%);
+      color: #f0e0a0; border: 2px solid #cc8830; border-radius: 6px;
+      cursor: pointer; letter-spacing: .08em; text-transform: uppercase;
+      transition: background .15s, transform .08s; box-shadow: 0 4px 18px rgba(0,0,0,.55);
+    }
+    #overlay button:hover  { background: linear-gradient(180deg,#bb1010 0%,#850000 100%); }
+    #overlay button:active { transform: translateY(1px); }
+  </style>
+</head>
+<body>
+  <div id="hud"></div>
+  <div id="overlay">
+    <h1>Römer vs. Barbaren</h1>
+    <p>Zwei Armeen. Eine Entscheidung.</p>
+    <button id="startBtn">Kampf beginnen</button>
+  </div>
+
+  <script type="module">
+import * as PIXI from 'pixi.js';
+
+/**
+ * Central configuration for the battle simulation.
+ * All balancing values, map dimensions and terrain layout live here.
+ */
+const CONFIG = {
+
+  SCREEN: {
+    WIDTH:  window.innerWidth,
+    HEIGHT: window.innerHeight,
+  },
+
+  MAP: {
+    COLS:   40,   // number of tile columns
+    ROWS:   30,   // number of tile rows
+    TILE_W: 64,   // screen width  of one isometric tile (local coords)
+    TILE_H: 32,   // screen height of one isometric tile (= TILE_W / 2)
+  },
+
+  // --- Terrain layout ---
+  // Romans deploy near rows 0-4 (top), Barbarians near rows 25-29 (bottom).
+  // Forests provide natural cover on both flanks.
+  // The pond sits at the bottom-left edge as impassable water.
+  TERRAIN: {
+    // Forest clusters: { col, row, cols, rows }
+    FORESTS: [
+      { col:  3, row:  3, cols: 5, rows: 3 },   // top-left  (near Roman lines)
+      { col:  9, row: 13, cols: 3, rows: 4 },   // center-left flank
+      { col: 28, row:  3, cols: 5, rows: 3 },   // top-right (near Roman lines)
+      { col: 26, row: 19, cols: 4, rows: 4 },   // center-right flank
+      { col: 19, row:  9, cols: 3, rows: 2 },   // center obstacle
+    ],
+    // Pond: { col, row, cols, rows }
+    POND: { col: 1, row: 22, cols: 7, rows: 6 },
+  },
+
+  // ── Starting formations ──────────────────────────────────────────────────
+  // Fighters are placed in a rectangular grid: COUNT fighters,
+  // COLS wide, spaced SPACING tile-units apart.
+  // Romans deploy near rows 1–7 (top), Barbarians near rows 22–28 (bottom).
+  // The centre of each formation is aligned on col ≈ 20 (map centre-x).
+  // ── Combat tuning ────────────────────────────────────────────────────────
+  BATTLE: {
+    MARCH_SPEED:     2.2,   // tile-units per second while marching / closing gap
+    SEP_RADIUS:      0.85,  // tile-units – personal-space bubble between fighters
+    SEP_FORCE:       0.6,   // blend weight: separation vs. seek
+    ENGAGE_RANGE:    1.0,   // tile-units – switch from march→combat on contact
+    ATTACK_RANGE:    0.9,   // tile-units – melee strike reach
+    ATTACK_COOLDOWN: 1.3,   // seconds between successive attacks
+    MIN_DAMAGE:      18,    // HP lost per hit (inclusive range)
+    MAX_DAMAGE:      28,
+    CELL_SIZE:       1.5,   // spatial-grid cell size in tile-units
+    HIT_FLASH:       0.15,  // seconds of red tint on a hit
+    DEATH_FADE:      0.6,   // seconds for a dead fighter to fade to invisible
+  },
+
+  UNITS: {
+    ROMAN: {
+      COUNT:   200,
+      COLS:    25,      // fighters per row
+      SPACING: 0.75,    // tile-units between fighters
+      START:   { col: 11.0, row: 1.0 },
+    },
+    BARBARIAN: {
+      COUNT:   200,
+      COLS:    27,
+      SPACING: 0.75,
+      START:   { col: 10.0, row: 22.5 },
+    },
+  },
+
+};
+
+// ─────────────────────────────────────────────────────────────
+
+const { COLS, ROWS, TILE_W, TILE_H } = CONFIG.MAP;
+const HW = TILE_W / 2;   // half tile width  (32 px)
+const HH = TILE_H / 2;   // half tile height (16 px)
+
+// ── Tile type constants ──────────────────────────────────────────────────────
+const TILE_TYPE = Object.freeze({ GRASS: 0, FOREST: 1, WATER: 2 });
+
+// ── Isometric coordinate helpers ─────────────────────────────────────────────
+/**
+ * Convert tile grid position to local screen position (top corner of diamond).
+ * ox / oy are the map's origin offset (top tile at col=0, row=0).
+ */
+function tileToScreen(col, row, ox, oy) {
+  return {
+    x: (col - row) * HW + ox,
+    y: (col + row) * HH + oy,
+  };
+}
+
+/**
+ * Inverse: screen → fractional tile position (for mouse picking).
+ */
+function screenToTile(sx, sy, ox, oy) {
+  const dx = (sx - ox) / HW;
+  const dy = (sy - oy) / HH;
+  return { col: (dx + dy) / 2, row: (dy - dx) / 2 };
+}
+
+// ── Tile appearance ──────────────────────────────────────────────────────────
+// Three slightly different grass shades for organic-looking ground variation.
+const GRASS_VARIANTS = [0x72b444, 0x6aaa3c, 0x7cbc4c];
+
+const TILE_STYLE = {
+  [TILE_TYPE.GRASS]:  { line: 0x4a8a24 },
+  [TILE_TYPE.FOREST]: { fill: 0x3a6818, line: 0x284e10 },
+  [TILE_TYPE.WATER]:  { fill: 0x3888b8, line: 0x2668a0 },
+};
+
+// ── IsometricMap ─────────────────────────────────────────────────────────────
+class IsometricMap {
+  constructor() {
+    // Container that main.js will add to the world.
+    this.container = new PIXI.Container();
+
+    // Origin: tile (0,0) top-corner at (ox, oy) in local space.
+    // Setting ox = ROWS * HW ensures the leftmost tile edge starts at x ≈ 0.
+    this.ox = ROWS * HW;  // 30 × 32 = 960
+    this.oy = 0;
+
+    // Tile type grid  [row][col]
+    this.grid = Array.from({ length: ROWS }, () => new Uint8Array(COLS));
+  }
+
+  // ── Public API ─────────────────────────────────────────────────────────────
+
+  setTile(col, row, type) {
+    if (col >= 0 && col < COLS && row >= 0 && row < ROWS) {
+      this.grid[row][col] = type;
+    }
+  }
+
+  getTile(col, row) {
+    if (col >= 0 && col < COLS && row >= 0 && row < ROWS) {
+      return this.grid[row][col];
+    }
+    return -1;
+  }
+
+  /** Screen position of a tile's top corner (in IsometricMap local space). */
+  tilePosToScreen(col, row) {
+    return tileToScreen(col, row, this.ox, this.oy);
+  }
+
+  /**
+   * (Re-)build the tile graphics.
+   * Call once after all tile types have been set via setTile().
+   * Uses the Painter's Algorithm: tiles are drawn diagonal-by-diagonal,
+   * back to front, so that overlapping decorations render correctly.
+   */
+  build() {
+    this.container.removeChildren();
+
+    const g = new PIXI.Graphics();
+
+    // d = col + row  (depth layer; 0 = back, max = front)
+    for (let d = 0; d < COLS + ROWS - 1; d++) {
+      const colMin = Math.max(0, d - ROWS + 1);
+      const colMax = Math.min(d, COLS - 1);
+      for (let col = colMin; col <= colMax; col++) {
+        const row = d - col;
+        const { x, y } = this.tilePosToScreen(col, row);
+        this._drawTile(g, x, y, this.grid[row][col], col, row);
+      }
+    }
+
+    this.container.addChild(g);
+  }
+
+  // ── Private ────────────────────────────────────────────────────────────────
+
+  _drawTile(g, x, y, type, col, row) {
+    let fill, line;
+
+    if (type === TILE_TYPE.GRASS) {
+      // Deterministic variation so neighbouring tiles differ slightly.
+      fill = GRASS_VARIANTS[(col * 3 + row * 7) % GRASS_VARIANTS.length];
+      line = TILE_STYLE[TILE_TYPE.GRASS].line;
+    } else {
+      ({ fill, line } = TILE_STYLE[type]);
+    }
+
+    g.lineStyle(1, line, 0.55);
+    g.beginFill(fill);
+    g.moveTo(x,      y);           // top
+    g.lineTo(x + HW, y + HH);     // right
+    g.lineTo(x,      y + TILE_H); // bottom
+    g.lineTo(x - HW, y + HH);     // left
+    g.closePath();
+    g.endFill();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+
+// (see above)
+// (see above)
+// (see above)
+
+class Terrain {
+  /**
+   * @param {import('./IsometricMap.js').IsometricMap} isoMap
+   */
+  constructor(isoMap) {
+    this.map = isoMap;
+    // Separate container so decorations draw above the tile layer.
+    this.container = new PIXI.Container();
+    this._placeTiles();
+  }
+
+  // ── Public API ─────────────────────────────────────────────────────────────
+
+  /**
+   * Build decoration graphics (trees, water ripples).
+   * Must be called AFTER isoMap.build() so it renders on top.
+   * Respects the same diagonal (Painter's Algorithm) draw order.
+   */
+  buildDecorations() {
+    this.container.removeChildren();
+    const g = new PIXI.Graphics();
+
+    for (let d = 0; d < COLS + ROWS - 1; d++) {
+      const colMin = Math.max(0, d - ROWS + 1);
+      const colMax = Math.min(d, COLS - 1);
+      for (let col = colMin; col <= colMax; col++) {
+        const row  = d - col;
+        const type = this.map.getTile(col, row);
+        const { x, y } = this.map.tilePosToScreen(col, row);
+
+        if (type === TILE_TYPE.FOREST) {
+          // cy = visual "ground centre" of the tile
+          this._drawTree(g, x, y + HH, col, row);
+        } else if (type === TILE_TYPE.WATER) {
+          this._drawWaterDetail(g, x, y);
+        }
+      }
+    }
+
+    this.container.addChild(g);
+  }
+
+  // ── Private ────────────────────────────────────────────────────────────────
+
+  /** Write terrain tile types into the map grid. */
+  _placeTiles() {
+    for (const f of CONFIG.TERRAIN.FORESTS) {
+      for (let dc = 0; dc < f.cols; dc++) {
+        for (let dr = 0; dr < f.rows; dr++) {
+          this.map.setTile(f.col + dc, f.row + dr, TILE_TYPE.FOREST);
+        }
+      }
+    }
+
+    const p = CONFIG.TERRAIN.POND;
+    for (let dc = 0; dc < p.cols; dc++) {
+      for (let dr = 0; dr < p.rows; dr++) {
+        this.map.setTile(p.col + dc, p.row + dr, TILE_TYPE.WATER);
+      }
+    }
+  }
+
+  /**
+   * Draw a stylised isometric tree centred at (cx, cy).
+   * Slight size and colour variation is derived deterministically from
+   * the tile's grid position so the forest looks organic.
+   *
+   * @param {PIXI.Graphics} g
+   * @param {number} cx  - centre-x of the tile (top corner x)
+   * @param {number} cy  - ground-centre-y of the tile  (top-y + HH)
+   */
+  _drawTree(g, cx, cy, col, row) {
+    // Cheap deterministic hash for visual variation
+    const hash      = (col * 1234 + row * 5678) & 0xffff;
+    const trunkH    = 14 + (hash % 6);          // 14–19 px
+    const canopyRx  = 16 + ((hash >> 4) % 5);   // 16–20 px
+    const canopyRy  = Math.round(canopyRx * 0.68);
+
+    // Soft drop-shadow
+    g.lineStyle(0);
+    g.beginFill(0x000000, 0.18);
+    g.drawEllipse(cx, cy + 1, canopyRx * 0.75, canopyRx * 0.28);
+    g.endFill();
+
+    // Trunk
+    g.beginFill(0x6b4226);
+    g.drawRect(cx - 3, cy - trunkH, 6, trunkH);
+    g.endFill();
+
+    // Lower canopy (darkest)
+    g.beginFill(0x2a6010);
+    g.drawEllipse(cx, cy - trunkH - canopyRy * 0.5, canopyRx, canopyRy);
+    g.endFill();
+
+    // Middle canopy
+    g.beginFill(0x3a7a18);
+    g.drawEllipse(cx, cy - trunkH - canopyRy * 1.3, canopyRx * 0.78, canopyRy * 0.78);
+    g.endFill();
+
+    // Top canopy (lightest, smallest)
+    g.beginFill(0x4c9422);
+    g.drawEllipse(cx, cy - trunkH - canopyRy * 2.0, canopyRx * 0.55, canopyRy * 0.55);
+    g.endFill();
+
+    // Specular highlight
+    g.beginFill(0x78c040, 0.35);
+    g.drawEllipse(cx - 3, cy - trunkH - canopyRy * 2.2, canopyRx * 0.22, canopyRy * 0.22);
+    g.endFill();
+  }
+
+  /**
+   * Draw subtle ripple lines on a water tile.
+   * @param {PIXI.Graphics} g
+   * @param {number} x  - top corner x of the tile
+   * @param {number} y  - top corner y of the tile
+   */
+  _drawWaterDetail(g, x, y) {
+    const cx = x;
+    const cy = y + HH;   // vertical centre of the tile
+
+    // Two small horizontal squiggles suggesting a reflection
+    g.lineStyle(1, 0x70c0e0, 0.45);
+    g.moveTo(cx - 8, cy - 3);
+    g.lineTo(cx + 8, cy - 3);
+
+    g.moveTo(cx - 5, cy + 3);
+    g.lineTo(cx + 5, cy + 3);
+
+    g.lineStyle(0);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Fighter – data model for a single combatant.
+ * Pure data; no PixiJS dependency.
+ */
+class Fighter {
+  /**
+   * @param {object} opts
+   * @param {number} opts.id
+   * @param {number} opts.col   – continuous tile column (float)
+   * @param {number} opts.row   – continuous tile row    (float)
+   * @param {'roman'|'barbarian'} opts.team
+   */
+  constructor({ id, col, row, team }) {
+    this.id   = id;
+    this.col  = col;
+    this.row  = row;
+    this.team = team;
+
+    // ── Vitals ──────────────────────────────────────────────────────────────
+    this.hp    = 100;
+    this.maxHp = 100;
+    this.alive = true;
+
+    // ── Battle state ─────────────────────────────────────────────────────────
+    /** 'idle' | 'march' | 'combat' */
+    this.state = 'idle';
+
+    /** Currently targeted enemy Fighter, or null. */
+    this.combatTarget = null;
+
+    /** Seconds until next attack is allowed. */
+    this.attackTimer = 0;
+
+    // ── Visual signals (read by UnitManager.syncSprites) ────────────────────
+    /** Seconds remaining for red hit-flash tint. Set by BattleManager. */
+    this.hitFlash = 0;
+
+    /** Seconds remaining for death fade-out. Set by BattleManager on death. */
+    this.deathTimer = 0;
+
+    /** PIXI.Sprite – set by UnitManager after sprite creation. */
+    this.sprite = null;
+  }
+
+  /** Isometric depth: larger = visually in front. Used for z-ordering. */
+  get depth() { return this.col + this.row; }
+}
+
+// ─────────────────────────────────────────────────────────────
+
+// ── Per-team visual style ────────────────────────────────────────────────────
+const TEAM_STYLE = {
+  roman: {
+    fill:      0xcc1e1e,
+    outline:   0x7a0808,
+    highlight: 0xff8080,
+  },
+  barbarian: {
+    fill:      0x2244cc,
+    outline:   0x0c1e77,
+    highlight: 0x88aaff,
+  },
+};
+
+// ── UnitManager ──────────────────────────────────────────────────────────────
+class UnitManager {
+  /**
+   * @param {import('../map/IsometricMap.js').IsometricMap} isoMap
+   * @param {PIXI.Renderer} renderer
+   */
+  constructor(isoMap, renderer) {
+    this.map      = isoMap;
+    this.renderer = renderer;
+
+    /** All Fighter instances. */
+    this.fighters = [];
+
+    /** PixiJS container added to the world by main.js. */
+    this.container = new PIXI.Container();
+    // Enable PixiJS auto-sort by sprite.zIndex each render frame.
+    this.container.sortableChildren = true;
+
+    this._tex = {};  // { roman: RenderTexture, barbarian: RenderTexture }
+
+    this._buildTextures();
+    this._spawnAll();
+    this._buildSprites();
+  }
+
+  // ── Public API ─────────────────────────────────────────────────────────────
+
+  /**
+   * Sync every sprite's position, z-order, tint, and alpha from fighter data.
+   * Call once per frame after BattleManager.update().
+   *
+   *   • Position / depth  (fighters that moved)
+   *   • Hit-flash tint    (brief red blink on damage)
+   *   • Death fade-out    (alpha → 0 over DEATH_FADE seconds, then hidden)
+   *
+   * @param {number} dt  seconds since last frame
+   */
+  syncSprites(dt) {
+    const { TILE_H }     = CONFIG.MAP;
+    const { DEATH_FADE } = CONFIG.BATTLE;
+
+    for (const f of this.fighters) {
+      const spr = f.sprite;
+      if (!spr) continue;
+
+      // Dead fighter: fade out then hide.
+      if (!f.alive) {
+        if (f.deathTimer > 0) {
+          f.deathTimer -= dt;
+          spr.alpha = Math.max(0, f.deathTimer / DEATH_FADE);
+          if (f.deathTimer <= 0) spr.visible = false;
+        }
+        continue;
+      }
+
+      // Alive fighter: sync position and depth.
+      const { x, y } = this.map.tilePosToScreen(f.col, f.row);
+      spr.x      = x;
+      spr.y      = y + TILE_H / 2;
+      spr.zIndex = f.depth;
+
+      // Hit-flash tint: red → white.
+      if (f.hitFlash > 0) {
+        f.hitFlash -= dt;
+        spr.tint = f.hitFlash > 0 ? 0xff4444 : 0xffffff;
+      }
+    }
+  }
+
+  // ── Private: textures ──────────────────────────────────────────────────────
+
+  _buildTextures() {
+    for (const team of ['roman', 'barbarian']) {
+      this._tex[team] = this._makeTexture(team);
+    }
+  }
+
+  /**
+   * Render a small fighter icon into a RenderTexture.
+   *
+   * Layout (W=20, H=24):
+   *   • Shadow ellipse at y≈21 (ground level)
+   *   • Body circle   centred at (10, 9)
+   *   • Highlight dot at (7, 6)
+   *
+   * Sprite anchor will be set to (0.5, ~0.88) so that the shadow
+   * sits exactly on the tile's ground-centre point.
+   */
+  _makeTexture(team) {
+    const { fill, outline, highlight } = TEAM_STYLE[team];
+    const W = 20, H = 24;
+    const CX = 10, CY = 9, R = 8;
+
+    const g = new PIXI.Graphics();
+
+    // Drop-shadow on the tile surface
+    g.beginFill(0x000000, 0.22);
+    g.drawEllipse(CX, H - 3, R * 0.85, R * 0.28);
+    g.endFill();
+
+    // Body
+    g.lineStyle(1.5, outline, 0.9);
+    g.beginFill(fill);
+    g.drawCircle(CX, CY, R);
+    g.endFill();
+
+    // Specular highlight
+    g.lineStyle(0);
+    g.beginFill(highlight, 0.38);
+    g.drawCircle(CX - 2, CY - 2, 3);
+    g.endFill();
+
+    // Render into a fixed-size texture so bounds are deterministic.
+    const rt = PIXI.RenderTexture.create({ width: W, height: H });
+    this.renderer.render(g, { renderTexture: rt });
+    g.destroy();
+    return rt;
+  }
+
+  // ── Private: spawning ──────────────────────────────────────────────────────
+
+  _spawnAll() {
+    this._spawnFormation('roman',     CONFIG.UNITS.ROMAN);
+    this._spawnFormation('barbarian', CONFIG.UNITS.BARBARIAN);
+  }
+
+  /**
+   * Place fighters in a rectangular grid formation.
+   * Fighters are spaced SPACING tile-units apart, laid out row-first.
+   */
+  _spawnFormation(team, cfg) {
+    const { COUNT, COLS, SPACING, START } = cfg;
+    for (let i = 0; i < COUNT; i++) {
+      const fc = i % COLS;
+      const fr = Math.floor(i / COLS);
+      this.fighters.push(new Fighter({
+        id:  this.fighters.length,
+        col: START.col + fc * SPACING,
+        row: START.row + fr * SPACING,
+        team,
+      }));
+    }
+  }
+
+  // ── Private: sprites ───────────────────────────────────────────────────────
+
+  _buildSprites() {
+    const { TILE_H } = CONFIG.MAP;
+
+    for (const f of this.fighters) {
+      const spr = new PIXI.Sprite(this._tex[f.team]);
+
+      // Anchor: horizontal centre, and 88 % down so the shadow sits
+      // on the tile's ground-centre (= tilePosToScreen + TILE_H/2).
+      spr.anchor.set(0.5, 0.88);
+
+      const { x, y } = this.map.tilePosToScreen(f.col, f.row);
+      spr.x = x;
+      spr.y = y + TILE_H / 2;   // ground-centre of the tile
+
+      spr.zIndex = f.depth;
+
+      f.sprite = spr;
+      this.container.addChild(spr);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * BattleManager – pure game-logic core.
+ * No PixiJS dependency; reads and writes Fighter data only.
+ *
+ * Phases:
+ *   READY  – armies in formation, waiting for start()
+ *   MARCH  – fighters advance and fight
+ *   DONE   – one side wiped out, onVictory callback fired
+ */
+
+const { BATTLE } = CONFIG;
+const CELL = BATTLE.CELL_SIZE;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function dist2(a, b) {
+  const dc = a.col - b.col;
+  const dr = a.row - b.row;
+  return dc * dc + dr * dr;
+}
+
+function centroid(list) {
+  let sc = 0, sr = 0;
+  for (const f of list) { sc += f.col; sr += f.row; }
+  return { col: sc / list.length, row: sr / list.length };
+}
+
+// ── BattleManager ─────────────────────────────────────────────────────────────
+class BattleManager {
+  /**
+   * @param {import('../units/Fighter.js').Fighter[]} fighters
+   * @param {import('../map/IsometricMap.js').IsometricMap} isoMap
+   * @param {(winner: 'roman'|'barbarian') => void} onVictory
+   */
+  constructor(fighters, isoMap, onVictory) {
+    this.fighters   = fighters;
+    this.map        = isoMap;
+    this._onVictory = onVictory;
+    this.phase      = 'READY';
+
+    // O(1) survivor counts; decremented on each death.
+    this._counts = {
+      roman:     fighters.filter(f => f.team === 'roman').length,
+      barbarian: fighters.filter(f => f.team === 'barbarian').length,
+    };
+
+    this._grid = new Map();   // spatial hash: "cx,cy" → Fighter[]
+  }
+
+  get counts() { return this._counts; }
+
+  start() {
+    for (const f of this.fighters) f.state = 'march';
+    this.phase = 'MARCH';
+  }
+
+  /**
+   * Advance simulation by one frame.
+   * @param {number} dt  seconds since last frame
+   */
+  update(dt) {
+    if (this.phase !== 'MARCH') return;
+
+    this._buildGrid();
+
+    // Enemy centroids computed once; all fighters of a team aim at the same point.
+    const romans     = this.fighters.filter(f => f.team === 'roman'     && f.alive);
+    const barbarians = this.fighters.filter(f => f.team === 'barbarian' && f.alive);
+    const romanCtr      = romans.length     ? centroid(romans)     : null;
+    const barbarianCtr  = barbarians.length ? centroid(barbarians) : null;
+
+    for (const f of this.fighters) {
+      if (!f.alive) continue;
+
+      const enemyCtr = f.team === 'roman' ? barbarianCtr : romanCtr;
+      if (!enemyCtr) continue;
+
+      if      (f.state === 'march')  this._doMarch(f, enemyCtr, dt);
+      else if (f.state === 'combat') this._doCombat(f, dt);
+    }
+
+    this._checkVictory();
+  }
+
+  // ── Spatial grid ──────────────────────────────────────────────────────────
+
+  _buildGrid() {
+    this._grid.clear();
+    for (const f of this.fighters) {
+      if (!f.alive) continue;
+      const key = `${(f.col / CELL) | 0},${(f.row / CELL) | 0}`;
+      let cell = this._grid.get(key);
+      if (!cell) { cell = []; this._grid.set(key, cell); }
+      cell.push(f);
+    }
+  }
+
+  _getNearby(f, radius) {
+    const cr = (radius / CELL + 1) | 0;
+    const cx = (f.col  / CELL) | 0;
+    const cy = (f.row  / CELL) | 0;
+    const out = [];
+    for (let dx = -cr; dx <= cr; dx++) {
+      for (let dy = -cr; dy <= cr; dy++) {
+        const cell = this._grid.get(`${cx + dx},${cy + dy}`);
+        if (cell) for (const o of cell) if (o !== f) out.push(o);
+      }
+    }
+    return out;
+  }
+
+  // ── Movement ──────────────────────────────────────────────────────────────
+
+  _doMarch(f, enemyCtr, dt) {
+    // Seek toward enemy centroid (unit vector).
+    let seekDc = enemyCtr.col - f.col;
+    let seekDr = enemyCtr.row - f.row;
+    const seekLen = Math.sqrt(seekDc * seekDc + seekDr * seekDr);
+    if (seekLen > 0) { seekDc /= seekLen; seekDr /= seekLen; }
+
+    // One neighbour pass: separation + engagement detection.
+    const maxR = Math.max(BATTLE.SEP_RADIUS, BATTLE.ENGAGE_RANGE);
+    let sepDc = 0, sepDr = 0;
+    let closestEnemy = null;
+    let closestD2    = BATTLE.ENGAGE_RANGE * BATTLE.ENGAGE_RANGE;
+
+    for (const o of this._getNearby(f, maxR)) {
+      if (!o.alive) continue;
+      const ddc = f.col - o.col;
+      const ddr = f.row - o.row;
+      const d2  = ddc * ddc + ddr * ddr;
+
+      // Separation from ALL nearby fighters.
+      if (d2 < BATTLE.SEP_RADIUS * BATTLE.SEP_RADIUS && d2 > 0) {
+        const d = Math.sqrt(d2);
+        const w = 1.0 - d / BATTLE.SEP_RADIUS;
+        sepDc += (ddc / d) * w;
+        sepDr += (ddr / d) * w;
+      }
+
+      // Nearest enemy within engage range.
+      if (o.team !== f.team && d2 < closestD2) {
+        closestD2    = d2;
+        closestEnemy = o;
+      }
+    }
+
+    // Blend seek + separation, then normalise to constant speed.
+    let vx = seekDc + sepDc * BATTLE.SEP_FORCE;
+    let vy = seekDr + sepDr * BATTLE.SEP_FORCE;
+    const vlen = Math.sqrt(vx * vx + vy * vy);
+    if (vlen > 0) { vx /= vlen; vy /= vlen; }
+
+    // Terrain-aware step: skip water tiles.
+    const nc = f.col + vx * BATTLE.MARCH_SPEED * dt;
+    const nr = f.row + vy * BATTLE.MARCH_SPEED * dt;
+    if (this.map.getTile(Math.round(nc), Math.round(nr)) !== TILE_TYPE.WATER) {
+      f.col = nc;
+      f.row = nr;
+    }
+
+    // Engage if an enemy is in range.
+    if (closestEnemy) {
+      f.state        = 'combat';
+      f.combatTarget = closestEnemy;
+      // Stagger first attack so not everyone swings at the same instant.
+      f.attackTimer  = Math.random() * BATTLE.ATTACK_COOLDOWN * 0.5;
+    }
+  }
+
+  // ── Combat ────────────────────────────────────────────────────────────────
+
+  _doCombat(f, dt) {
+    // Refresh stale or dead target.
+    if (!f.combatTarget?.alive) {
+      f.combatTarget = this._nearestEnemy(f, BATTLE.ENGAGE_RANGE * 2.5);
+      if (!f.combatTarget) { f.state = 'march'; return; }
+    }
+
+    const e  = f.combatTarget;
+    const dc = e.col - f.col;
+    const dr = e.row - f.row;
+    const d  = Math.sqrt(dc * dc + dr * dr);
+
+    // Close the gap if target drifted out of attack range.
+    if (d > BATTLE.ATTACK_RANGE) {
+      const s = BATTLE.MARCH_SPEED * 0.55 * dt / d;
+      f.col += dc * s;
+      f.row += dr * s;
+    }
+
+    // Attack tick.
+    f.attackTimer -= dt;
+    if (f.attackTimer <= 0 && d <= BATTLE.ATTACK_RANGE) {
+      f.attackTimer = BATTLE.ATTACK_COOLDOWN;
+
+      const dmg  = BATTLE.MIN_DAMAGE
+                 + Math.random() * (BATTLE.MAX_DAMAGE - BATTLE.MIN_DAMAGE);
+      e.hp      -= dmg;
+      e.hitFlash = BATTLE.HIT_FLASH;
+
+      if (e.hp <= 0) {
+        e.alive        = false;
+        e.hp           = 0;
+        e.hitFlash     = 0;          // clear flash so death-fade is clean
+        e.deathTimer   = BATTLE.DEATH_FADE;
+        f.combatTarget = null;
+        this._counts[e.team]--;
+      }
+    }
+  }
+
+  _nearestEnemy(f, maxRange) {
+    let best = null, bestD2 = maxRange * maxRange;
+    for (const o of this._getNearby(f, maxRange)) {
+      if (o.team === f.team || !o.alive) continue;
+      const d2 = dist2(f, o);
+      if (d2 < bestD2) { bestD2 = d2; best = o; }
+    }
+    return best;
+  }
+
+  // ── Victory ───────────────────────────────────────────────────────────────
+
+  _checkVictory() {
+    if (this._counts.roman <= 0 || this._counts.barbarian <= 0) {
+      this.phase = 'DONE';
+      const winner = this._counts.roman > 0 ? 'roman' : 'barbarian';
+      this._onVictory?.(winner);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * main.js  –  Entry point for the Ancient Battle Simulation.
+ *
+ * Step 1 scope: isometric map with terrain (grass, forests, pond).
+ * Camera: drag to pan, scroll-wheel to zoom.
+ */
+
+// ── PixiJS application ───────────────────────────────────────────────────────
+const app = new PIXI.Application({
+  width:           CONFIG.SCREEN.WIDTH,
+  height:          CONFIG.SCREEN.HEIGHT,
+  backgroundColor: 0x2a4a18,   // dark green – visible only outside the map
+  antialias:       true,
+  resolution:      window.devicePixelRatio || 1,
+  autoDensity:     true,
+});
+document.body.appendChild(app.view);
+
+// ── World container – everything in the game lives here ──────────────────────
+const world = new PIXI.Container();
+app.stage.addChild(world);
+
+// ── Build map ────────────────────────────────────────────────────────────────
+const isoMap  = new IsometricMap();
+const terrain = new Terrain(isoMap);   // sets tile types into isoMap.grid
+
+isoMap.build();             // render tiles using Painter's Algorithm
+terrain.buildDecorations(); // draw trees / water ripples on top of tiles
+
+world.addChild(isoMap.container);
+world.addChild(terrain.container);
+
+// ── Spawn fighters ────────────────────────────────────────────────────────────
+const unitMgr = new UnitManager(isoMap, app.renderer);
+world.addChild(unitMgr.container);
+
+// ── Battle manager ────────────────────────────────────────────────────────────
+const onVictory = (winner) => {
+  const label = winner === 'roman' ? 'Roma Victoria!' : 'Die Barbaren triumphieren!';
+  const survivors = battleMgr.counts[winner];
+  const overlay = document.getElementById('overlay');
+  overlay.querySelector('h1').textContent = label;
+  overlay.querySelector('p').textContent  = `${survivors} Überlebende`;
+  const btn = overlay.querySelector('button');
+  btn.textContent = 'Neustart';
+  btn.onclick     = () => location.reload();
+  overlay.style.display = 'flex';
+};
+
+const battleMgr = new BattleManager(unitMgr.fighters, isoMap, onVictory);
+
+// ── Fit whole battlefield into the viewport on startup ───────────────────────
+// (see above)
+
+// The map's bounding box in local (world) coordinates:
+//   width  = (COLS + ROWS) * TILE_W/2   ≈ 2240 px
+//   height = (COLS + ROWS) * TILE_H/2   ≈ 1120 px
+//   centre = ( width/2,  height/2 )     = (1120, 560)
+const mapLocalW   = (COLS + ROWS) * (TILE_W / 2);
+const mapLocalH   = (COLS + ROWS) * (TILE_H / 2);
+const localCentreX = mapLocalW / 2;
+const localCentreY = mapLocalH / 2;
+
+const initScale = Math.min(
+  CONFIG.SCREEN.WIDTH  / mapLocalW,
+  CONFIG.SCREEN.HEIGHT / mapLocalH,
+) * 0.92;   // 8 % margin
+
+world.scale.set(initScale);
+world.x = CONFIG.SCREEN.WIDTH  / 2 - localCentreX * initScale;
+world.y = CONFIG.SCREEN.HEIGHT / 2 - localCentreY * initScale;
+
+// ── Drag to pan ───────────────────────────────────────────────────────────────
+let drag = null;  // { startMouse, startWorld }
+
+app.stage.interactive = true;
+app.stage.hitArea = app.screen;
+
+app.stage.on('pointerdown', e => {
+  drag = {
+    startMouse: { x: e.global.x, y: e.global.y },
+    startWorld: { x: world.x,    y: world.y    },
+  };
+});
+
+app.stage.on('pointermove', e => {
+  if (!drag) return;
+  world.x = drag.startWorld.x + (e.global.x - drag.startMouse.x);
+  world.y = drag.startWorld.y + (e.global.y - drag.startMouse.y);
+});
+
+const stopDrag = () => { drag = null; };
+app.stage.on('pointerup',        stopDrag);
+app.stage.on('pointerupoutside', stopDrag);
+
+// ── Scroll-wheel zoom ─────────────────────────────────────────────────────────
+app.view.addEventListener('wheel', e => {
+  e.preventDefault();
+
+  const factor   = e.deltaY < 0 ? 1.1 : (1 / 1.1);
+  const newScale = Math.max(0.25, Math.min(3.5, world.scale.x * factor));
+
+  // Keep the point under the cursor fixed in world space
+  const mx = e.clientX;
+  const my = e.clientY;
+  const wx = (mx - world.x) / world.scale.x;
+  const wy = (my - world.y) / world.scale.y;
+
+  world.scale.set(newScale);
+  world.x = mx - wx * newScale;
+  world.y = my - wy * newScale;
+}, { passive: false });
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+document.getElementById('hud').innerHTML = `
+  <b>Antike Schlachtsimulation</b><br>
+  <span style="color:#ff8080">Römer: <span id="hud-roman">${CONFIG.UNITS.ROMAN.COUNT}</span></span>
+  &nbsp;|&nbsp;
+  <span style="color:#88aaff">Barbaren: <span id="hud-barbarian">${CONFIG.UNITS.BARBARIAN.COUNT}</span></span><br>
+  <small>Linksklick + Ziehen &nbsp;|&nbsp; Mausrad: Zoom</small>
+`;
+
+// Cache span references so the ticker never queries the DOM by id.
+const hudRoman     = document.getElementById('hud-roman');
+const hudBarbarian = document.getElementById('hud-barbarian');
+let   prevRoman    = CONFIG.UNITS.ROMAN.COUNT;
+let   prevBarb     = CONFIG.UNITS.BARBARIAN.COUNT;
+
+// ── Start button ──────────────────────────────────────────────────────────────
+document.getElementById('startBtn').addEventListener('click', () => {
+  document.getElementById('overlay').style.display = 'none';
+  battleMgr.start();
+});
+
+// ── Game loop ─────────────────────────────────────────────────────────────────
+app.ticker.add(() => {
+  const dt = app.ticker.deltaMS / 1000;   // real seconds since last frame
+
+  battleMgr.update(dt);       // game logic: move fighters, resolve attacks
+  unitMgr.syncSprites(dt);    // visual: position / tint / fade sprites
+
+  // Update HUD counters only when a fighter dies (minimise DOM writes).
+  const c = battleMgr.counts;
+  if (c.roman !== prevRoman) {
+    hudRoman.textContent = c.roman;
+    prevRoman = c.roman;
+  }
+  if (c.barbarian !== prevBarb) {
+    hudBarbarian.textContent = c.barbarian;
+    prevBarb = c.barbarian;
+  }
+});
+
+// ── Resize handler ────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  app.renderer.resize(window.innerWidth, window.innerHeight);
+  app.stage.hitArea = app.screen;
+});
+  </script>
+</body>
+</html>

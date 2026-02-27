@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Antike Schlachtsimulation</title>
+
+  <!-- Bind bare specifier "pixi.js" to CDN build (ES-module) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "pixi.js": "https://esm.sh/pixi.js@7"
+    }
+  }
+  </script>
+
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1e2d14; overflow: hidden; }
+    canvas { display: block; }
+
+    #hud {
+      position: fixed;
+      top: 12px; left: 12px;
+      color: #d4c89a;
+      font: 13px/1.6 'Segoe UI', sans-serif;
+      background: rgba(0, 0, 0, 0.58);
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: 1px solid rgba(210, 170, 80, 0.35);
+      pointer-events: none;
+      user-select: none;
+    }
+    #hud b { color: #f0d870; letter-spacing: 0.04em; }
+
+    /* ── Start / Victory overlay ── */
+    #overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(4, 8, 2, 0.72);
+      z-index: 100;
+      font-family: 'Segoe UI', Georgia, sans-serif;
+    }
+    #overlay h1 {
+      font-size: clamp(1.8rem, 4vw, 3rem);
+      color: #f0d870;
+      letter-spacing: 0.08em;
+      text-shadow: 0 2px 14px rgba(0,0,0,0.9);
+      margin-bottom: 0.4rem;
+      text-align: center;
+    }
+    #overlay p {
+      color: #a08858;
+      font-size: 1rem;
+      margin-bottom: 2.4rem;
+      text-align: center;
+    }
+    #overlay button {
+      padding: 13px 44px;
+      font-size: 1.05rem;
+      font-family: inherit;
+      background: linear-gradient(180deg, #9b0000 0%, #650000 100%);
+      color: #f0e0a0;
+      border: 2px solid #cc8830;
+      border-radius: 6px;
+      cursor: pointer;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      transition: background 0.15s, transform 0.08s;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.55);
+    }
+    #overlay button:hover  { background: linear-gradient(180deg, #bb1010 0%, #850000 100%); }
+    #overlay button:active { transform: translateY(1px); }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <b>Antike Schlachtsimulation</b><br>
+    Linksklick + Ziehen: Karte verschieben &nbsp;|&nbsp; Mausrad: Zoom
+  </div>
+
+  <div id="overlay">
+    <h1>Römer vs. Barbaren</h1>
+    <p>Zwei Armeen. Eine Entscheidung.</p>
+    <button id="startBtn">Kampf beginnen</button>
+  </div>
+
+  <!--
+    Lokale ES-Module benötigen einen HTTP-Server (kein file://).
+    Schnellstart:
+      python3 -m http.server 8080
+    Dann: http://localhost:8080
+  -->
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
